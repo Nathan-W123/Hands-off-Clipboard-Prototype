@@ -1,0 +1,298 @@
+# Build Phases — Cairn (Cactus Hackathon)
+
+Paste each phase prompt directly into Claude Code in order.
+Do not start the next phase until the current one is verified working.
+Always include the CLAUDE.md file in your Claude Code context before starting.
+
+---
+
+## Phase 1 — Project scaffold & type definitions
+**Goal:** Runnable Expo project with full TypeScript structure and all shared interfaces defined. No logic yet — just the skeleton everything else will be built on.
+
+```
+Using the CLAUDE.md as context, scaffold a new Expo React Native project in TypeScript with the following:
+
+1. Create the full directory structure:
+   /src/types, /src/services, /src/components, /src/screens, /src/templates
+
+2. Create /src/types/schemas.ts with strict TypeScript interfaces for:
+   - FieldMeasurement: id, schema_version, captured_at (ISO 8601), fields (Record<string, string | number | boolean>), raw_transcript, confidence_score (0–1), validated, synced, optional location (lat, lng)
+   - ChecklistEntry: id, checklist_id, step_index, step_label, confirmed, confirmed_at (optional), voice_response, synced
+   - FreeformNote: id, captured_at, raw_transcript, synced
+   - SyncQueueItem: id, table_name, payload (JSON string), created_at, synced, retry_count, last_error (optional)
+   - ParseResult: raw_transcript, confidence_score, parsed_fields (Record<string, string | number | boolean>), flag (optional string), validated
+
+3. Install dependencies: expo-sqlite, @react-native-community/netinfo, expo-haptics, expo-av, @supabase/supabase-js
+
+4. Create empty stub files (no logic, just exports) for all services:
+   cactus.ts, sqlite.ts, syncQueue.ts, supabase.ts, validation.ts
+
+5. Create empty stub screens: Home.tsx, Checklist.tsx, History.tsx
+
+6. Verify the project builds and runs with no TypeScript errors.
+
+No `any` types. No logic yet. Types only.
+```
+
+---
+
+## Phase 2 — SQLite local database
+**Goal:** Fully working local database service. All data written here first before anything touches the network.
+
+```
+Using CLAUDE.md and the types defined in /src/types/schemas.ts, implement /src/services/sqlite.ts:
+
+1. Initialize SQLite database on app launch using expo-sqlite
+2. Create these tables on init:
+   - field_measurements (matches FieldMeasurement interface)
+   - checklist_entries (matches ChecklistEntry interface)
+   - freeform_notes (matches FreeformNote interface)
+   - sync_queue (matches SyncQueueItem interface — this is the offline buffer)
+
+3. Implement typed functions:
+   - insertFieldMeasurement(record: FieldMeasurement): Promise<void>
+   - insertChecklistEntry(record: ChecklistEntry): Promise<void>
+   - insertFreeformNote(record: FreeformNote): Promise<void>
+   - getAllUnsynced(): Promise<SyncQueueItem[]>
+   - markSynced(id: string): Promise<void>
+   - getRecentRecords(limit: number): Promise<FieldMeasurement[]>
+
+4. Every insert must also write a corresponding row to sync_queue with synced: false
+
+5. Never delete records. SQLite is the source of truth.
+
+6. Write a quick test function that inserts a mock FieldMeasurement and reads it back. Log the result. Remove after confirming it works.
+
+Strict TypeScript. No any. Handle all SQLite errors with try/catch.
+```
+
+---
+
+## Phase 3 — Cactus SDK integration & voice parser
+**Goal:** The core engine. Voice input → Cactus STT → LLM → validated typed JSON. This is the most critical phase — do not move on until this is reliable.
+
+```
+Using CLAUDE.md and /src/types/schemas.ts, implement /src/services/cactus.ts:
+
+1. Initialise the Cactus SDK v1.12 with a small quantized LLM (LFM-2.5-350M or Gemma 3 1B) and Whisper STT model. Cache the model after first load — do not reload on every session.
+
+2. Implement startListening(): void — begins audio capture using expo-av
+3. Implement stopAndParse(activeSchema: Record<string, unknown>): Promise<ParseResult> — stops audio capture, runs Cactus STT on the recorded audio, then passes the transcript to the LLM
+
+4. The LLM system prompt must:
+   - List the active schema fields with their types and valid ranges
+   - Include these 10 few-shot input/output examples covering normal parses, out-of-range values, ambiguous values, and missing fields:
+     * "fuel level looks good, about three quarters" → { fuel_level: 0.75, confidence_score: 0.9, raw_transcript: "..." }
+     * "oil pressure forty seven" → { oil_pressure: 47, confidence_score: 0.85, raw_transcript: "..." }
+     * "temperature reading two hundred and forty" → { flag: "out_of_range", value: null, confidence_score: 0.4, raw_transcript: "..." }
+     * "throttle is uh maybe open, I think" → { flag: "ambiguous", value: null, confidence_score: 0.3, raw_transcript: "..." }
+     * "three adult red tailed hawks northwest two juveniles" → { species: "red-tailed hawk", adult_count: 3, juvenile_count: 2, bearing: "northwest", confidence_score: 0.95, raw_transcript: "..." }
+     * "crop looks diseased severity maybe four out of five" → { severity_rating: 4, health_status: "diseased", confidence_score: 0.88, raw_transcript: "..." }
+     * "part ID alpha seven seven dash B defect surface crack two point three millimetres" → { part_id: "A77-B", defect_type: "surface crack", dimension_mm: 2.3, confidence_score: 0.92, raw_transcript: "..." }
+     * "pH reading twelve" → { flag: "out_of_range", field: "ph", value: null, confidence_score: 0.4, raw_transcript: "..." }
+     * "altimeter set two niner niner two" → { altimeter: 29.92, confidence_score: 0.97, raw_transcript: "..." }
+     * "flaps twenty degrees confirmed" → { flaps_degrees: 20, confirmed: true, confidence_score: 0.99, raw_transcript: "..." }
+   - Instruct model to always return confidence_score (0–1) and raw_transcript
+   - Instruct model to flag uncertain values rather than guess
+   - Return only valid JSON, no markdown, no preamble
+
+5. Parse the LLM JSON response into a typed ParseResult
+
+6. Log the raw transcript and parsed result to console for debugging
+
+Strict TypeScript. Handle model load failure gracefully. Handle JSON parse errors from LLM response.
+```
+
+---
+
+## Phase 4 — Validation service
+**Goal:** On-device validation layer that checks every ParseResult before it hits SQLite.
+
+```
+Using CLAUDE.md and /src/types/schemas.ts, implement /src/services/validation.ts:
+
+1. Define a SchemaField type: { name: string, type: 'string' | 'number' | 'boolean', required: boolean, min?: number, max?: number }
+
+2. Implement validate(result: ParseResult, schema: SchemaField[]): ValidationOutcome
+   Return type ValidationOutcome: { valid: boolean, errors: ValidationError[], warnings: ValidationWarning[] }
+   Return type ValidationError: { field: string, reason: 'missing_required' | 'type_mismatch' | 'out_of_range' | 'low_confidence' | 'ambiguous' }
+   Return type ValidationWarning: { field: string, message: string }
+
+3. Rules to enforce:
+   - confidence_score below 0.7 → error: low_confidence
+   - result contains flag: "out_of_range" → error: out_of_range
+   - result contains flag: "ambiguous" → error: ambiguous
+   - required field missing from parsed_fields → error: missing_required
+   - field value type doesn't match schema → error: type_mismatch
+   - numeric value outside schema min/max → error: out_of_range
+
+4. Validation must be non-blocking — return errors but do not throw. Caller decides whether to commit or re-prompt.
+
+5. Export the three demo schema field definitions as constants:
+   PREFLIGHT_SCHEMA, CROP_SCOUT_SCHEMA, DEFECT_REPORT_SCHEMA
+   Each as SchemaField[] matching the demo template fields from CLAUDE.md
+
+Strict TypeScript. No any. Pure functions only — no side effects.
+```
+
+---
+
+## Phase 5 — Supabase client & sync queue
+**Goal:** Cloud sync layer that drains the SQLite queue automatically when signal returns. Supabase is never written to directly — always via the queue.
+
+```
+Using CLAUDE.md and /src/types/schemas.ts, implement /src/services/supabase.ts and /src/services/syncQueue.ts:
+
+supabase.ts:
+1. Initialise Supabase client with project URL and anon key (use placeholder constants for now — we will swap in real keys)
+2. Implement pushRecord(item: SyncQueueItem): Promise<boolean> — parses item.payload, inserts into the correct Supabase table based on item.table_name, returns true on success
+3. All Supabase calls must be wrapped in try/catch — never throw, return false on failure
+
+syncQueue.ts:
+1. Use @react-native-community/netinfo to monitor connectivity
+2. On connectivity change to online: call drainQueue()
+3. drainQueue(): fetch all unsynced SyncQueueItems from SQLite, attempt pushRecord() for each, on success call markSynced(), on failure increment retry_count and save last_error, skip items with retry_count > 5
+4. Implement exponential backoff: wait 2^retry_count seconds before retrying a failed item
+5. Export startSyncMonitor() — call this once on app launch to begin watching connectivity
+6. Export forcSync() — manually trigger drainQueue(), used for the demo sync button
+
+Strict TypeScript. Never write to Supabase directly from any other file — only through syncQueue. Handle all network errors gracefully.
+```
+
+---
+
+## Phase 6 — VoiceCapture component & core UI shell
+**Goal:** The primary UI. One screen, one button, real-time feedback. This is what the judges see.
+
+```
+Using CLAUDE.md, implement the VoiceCapture component and Home screen:
+
+/src/components/VoiceCapture.tsx:
+1. Large circular button, centred on screen with massive whitespace around it
+2. Two states: idle (press to activate) and listening (press again to stop and parse)
+3. On first press: call cactus.startListening(), animate button to listening state (subtle pulse — state transition only, no decorative animation), fire haptic via expo-haptics
+4. On second press: call cactus.stopAndParse(activeSchema), show loading state as text only ("Parsing..."), never a spinner
+5. On parse complete: pass result to validation service, fire haptic on success or failure
+6. Display ParsedPreview component below button showing structured JSON result
+7. If validation errors exist: display error labels in red beneath each flagged field, speak error via TTS ("Low confidence on fuel level — please repeat")
+8. SyncStatus indicator in top right corner — small dot, green when synced, amber when queue has pending items
+
+/src/components/ParsedPreview.tsx:
+1. Animated reveal of parsed JSON fields as key-value rows
+2. Each row: field name (muted, small) + value (bold, large)
+3. Flagged fields highlighted with red left border
+4. "Commit" button appears after successful parse — writes to SQLite and queues for sync
+
+/src/screens/Home.tsx:
+1. Template selector at top — horizontal scroll of three template pills (Preflight, Crop Scout, Defect Report)
+2. Active template name shown below selector
+3. VoiceCapture component fills remaining space
+
+Dark mode supported. Monochrome base. SF Pro / Roboto system fonts. Two weights only. No heavy UI libraries.
+```
+
+---
+
+## Phase 7 — Checklist runner
+**Goal:** Interactive voice-driven checklist that reads steps aloud and accepts verbal confirmations.
+
+```
+Using CLAUDE.md and /src/types/schemas.ts, implement /src/components/ChecklistRunner.tsx and /src/screens/Checklist.tsx:
+
+ChecklistRunner.tsx:
+1. Accepts a checklist template as prop (array of steps with label and required fields)
+2. State machine with states: idle → reading_step → awaiting_confirmation → confirmed → complete
+3. On step start: read step label aloud via TTS ("Step 3: Check fuel caps secured")
+4. Activate voice listening automatically after TTS completes
+5. On voice input: pass to Cactus STT, check for confirmation keywords ("confirmed", "check", "done", "yes", "good")
+6. On confirmation: fire haptic, mark step confirmed, write ChecklistEntry to SQLite via sqlite service, advance to next step
+7. On ambiguous response: re-read step and re-prompt ("Please confirm: fuel caps secured?")
+8. On checklist complete: show completion summary screen with all confirmed steps and timestamps
+
+Checklist.tsx:
+1. Progress bar at top showing steps completed / total
+2. Current step displayed large and centred
+3. Previous steps shown as a scrollable log below — confirmed steps in green with timestamp
+4. Manual override button per step — allow tap confirmation if voice fails
+
+Load preflight.json template by default. Strict TypeScript. All checklist state stored in SQLite as ChecklistEntry records.
+```
+
+---
+
+## Phase 8 — Demo templates & history screen
+**Goal:** Three pre-loaded templates fully wired and a history screen showing all captured records.
+
+```
+Using CLAUDE.md, create the three demo templates and History screen:
+
+1. Create /src/templates/preflight.json — RV-14 pre-flight checklist with 10 realistic steps covering fuel, oil, control surfaces, instruments, and communication. Each step has: id, label, required_fields (array of SchemaField), notes.
+
+2. Create /src/templates/cropscout.json — field measurement schema for crop scouting with fields: species (string, required), count (number, required, min 0 max 10000), gps_lat (number, optional), gps_lng (number, optional), severity_rating (number, required, min 1 max 5), notes (string, optional).
+
+3. Create /src/templates/defectreport.json — manufacturing defect schema with fields: part_id (string, required), defect_type (string, required), dimension_mm (number, optional, min 0 max 500), location_on_part (string, optional), inspector_note (string, optional).
+
+4. Implement /src/screens/History.tsx:
+   - List all records from SQLite ordered by captured_at descending
+   - Each row: template type icon, timestamp, first 2 parsed fields as preview, sync status dot
+   - Tap row to expand full parsed JSON
+   - Filter tabs: All, Unsynced, Checklists
+   - "Force Sync" button in header — calls syncQueue.forceSync() for the demo
+
+All template JSON must match the TypeScript interfaces in schemas.ts exactly.
+```
+
+---
+
+## Phase 9 — End-to-end integration & demo hardening
+**Goal:** Everything wired together, tested offline, sync demonstrated live. This is the demo-ready build.
+
+```
+Wire all phases together and harden for the demo:
+
+1. Ensure startSyncMonitor() from syncQueue.ts is called once in the root App.tsx on launch
+2. Ensure SQLite is initialised before any screen renders — show a brief "Loading..." text (not a spinner) if model is still loading
+3. Test the complete offline loop in airplane mode:
+   - Speak a crop scout entry → parse → validate → SQLite write → confirm in History screen
+   - Complete the preflight checklist → all steps confirmed → all entries in History
+   - Speak a defect report entry with a deliberate out-of-range value → confirm validation catches it and speaks the error
+
+4. Test the sync demo moment:
+   - With several unsynced records in queue, turn wifi back on
+   - Confirm records appear in Supabase dashboard within 5 seconds
+   - Confirm sync status dots turn green in History screen
+
+5. Add a "Demo Reset" button hidden in settings (triple-tap the app title) that clears all SQLite records — for resetting between demo runs
+
+6. Verify no TypeScript errors: run tsc --noEmit and fix all issues
+
+7. Verify the app runs on a real physical device, not just simulator. Test on both iOS and Android if possible.
+
+8. Document any hardcoded Supabase keys and replace with environment variables via expo-constants.
+```
+
+---
+
+## Phase 10 — Polish & pitch prep (final hour)
+**Goal:** Demo script rehearsed, app stable, nothing that can crash mid-demo.
+
+```
+Final polish pass before the demo:
+
+1. Remove all console.log statements except critical error logs
+2. Remove the debug test function from sqlite.ts if still present
+3. Ensure dark mode works correctly on all screens — test by switching device to dark mode
+4. Verify haptics fire correctly on a physical device for: parse success, validation error, sync complete, checklist step confirmed
+5. Ensure TTS spoken responses sound natural — adjust rate and pitch if needed
+6. Add the app name "Cairn" to the splash screen and app header
+7. Verify model cold load shows a clean loading state — not a blank white screen
+8. Prepare the demo script:
+   - Open app (model loads)
+   - Select Crop Scout template
+   - Speak a valid entry — show parse and validation
+   - Speak an invalid entry (out of range) — show validation catching it
+   - Complete 3 steps of the preflight checklist by voice
+   - Turn on wifi — show live sync to Supabase dashboard
+   - Open History — show all records, sync status green
+9. Do a full dry run of the demo script twice. Fix anything that felt awkward or slow.
+```
