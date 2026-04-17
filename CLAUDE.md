@@ -116,3 +116,13 @@ Each defined as a TypeScript interface and a corresponding Supabase table.
 9. Python export integrations — **post-hackathon**
 
 ---
+
+## Known Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| Cactus model cold load (10–30s) | Loading screen on first launch only, cache model after |
+| LLM parser accuracy | Write 15+ few-shot examples before any code |
+| Supabase sync queue complexity | Time-box 3hrs max — manual sync button acceptable for demo |
+| TTS latency | Test on real hardware hour 1, not hour 10 |
+| Noise kills STT | Push-to-activate toggle sidesteps this for the demo |
