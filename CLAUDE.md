@@ -100,6 +100,7 @@ Each defined as a TypeScript interface and a corresponding Supabase table.
 6. **Components under 150 lines** — extract logic to services
 7. **No loading spinners** — optimistic UI patterns only
 8. **Validate before committing** — run validation before every SQLite write
+9. The local database schema (SQLite/Realm) must always equal the cloud database schema. Any field, type, or structure defined in the cloud schema must be mirrored exactly in the local schema to ensure seamless store-and-forward sync with no transformation layer.
 
 ---
 
