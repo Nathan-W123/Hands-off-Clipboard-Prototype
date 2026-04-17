@@ -6,7 +6,6 @@ Offline-first, voice-driven data capture tool using the Cactus SDK. Three core p
 
 1. **Interactive Checklists** — voice-driven step confirmation with local state machine
 2. **Structured Database Entries** — spoken field notes parsed into typed JSON schemas
-3. **Free-form Notetaking** — unstructured voice observations stored and synced
 
 Core value proposition: convert spoken field notes into structured JSON payloads in extreme, offline, or noisy environments (aviation, agriculture, manufacturing) with zero cloud dependency at the point of capture.
 
